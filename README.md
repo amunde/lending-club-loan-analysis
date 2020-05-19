@@ -12,14 +12,25 @@ Our objective, therefore, in this project, is to build a classification model th
 Project Breakdown - 
 
 Introduction: Data and Problem Summary
+
 Data Cleaning and Feature Selection
+
 Extracting Relevant Features
+
 Addressing Missing Values
+
 Detecting Outliers
+
 Exploratory Data Analysis
+
 Methodology
+
 Selected Models
+
 Model 1: Logistic Regression
+
 Model 2: Linear Discriminant Analysis
+
 Model 3: Random Forest
+
 Discussion and Conclusion
