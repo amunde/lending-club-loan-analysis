@@ -1,0 +1,876 @@
+---
+title: "Data Mining Final Project"
+author: "VARAP Predictors"
+date: "5/11/2020"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+  html_document:
+    font color: null
+    highlight: tango
+    theme: paper
+    toc: yes
+    toc_depth: 3
+---
+
+Project Collaborators: [Varsha Jain](mailto:varshaj@andrew.cmu.edu), [Radhika Khandelwal](mailto:rkhandel@andrew.cmu.edu), [Akshay Tatyarao Munde](mailto:amunde@andrew.cmu.edu), and [Prasun Shrestha](mailto:pshresth@andrew.cmu.edu)
+
+
+
+```{r imports}
+
+set.seed(123)
+library(ggplot2)
+library(plyr)
+library(reshape2)
+library(splines)
+library(boot)
+library(broom)
+library(knitr)
+library(randomForest)
+library(lubridate)
+library(caret)
+library(pROC)
+library(gam)
+library(glmnet)
+library(klaR)
+library(dplyr)
+library(RColorBrewer)
+
+options(scipen = 4)
+```
+
+## Introduction: Data and Problem Summary
+
+```{r Dataset Import, cache = TRUE}
+# Importing data 
+# Link - https://www.kaggle.com/wendykan/lending-club-loan-data
+lending.club.loan = read.csv(file = "loan.csv")
+
+lending.club.loan.copy <- lending.club.loan # keeping a copy so that we will not have to import the CSV file again
+```
+
+Peer-to-peer (P2P) lending has transformed how people have access to credit and investing, as it connects borrowers and lenders, both of whom are individuals. Whether it be debt payment, small business growth, or investment in the future, these individuals, who might not qualify for lending practices by stereotypical measures can now participate in this ecosystem and help each other. 
+
+Lending Club is a pioneer in the P2P industry. Since 2007, it has over 26 billion dollars in loans to more than 1.5 million borrowers. Lending Club verifies if both investors and borrowers meet their criteria for a transaction. However, P2P lending poses a substantial risk for the lenders because the deposits are not secured, or FDIC insured. As a result, the lending practice can result in a loss for investors if a borrower defaults.
+
+Our objective, therefore, in this project, is to build a classification model that will predict whether a borrower will default or not. We have used Lending Club's loan data from 2007-2015, which includes pertinent payment and borrower's information. The original dataset lending club is a matrix of `r dim(lending.club.loan)[1]` observations and `dim(lending.club.loan)[2]` features.
+
+## Data Cleaning and Feature Selection 
+
+### Extracting Relevant Features
+
+In nutshell, we referred the documentation published in the 'Data Dictionary' on the [Lending Club website](https://www.kaggle.com/wendykan/lending-club-loan-data) to understand and contextualize the features. The summary statistics helped us extract the data to work with.
+
+Similarly, we removed rows with more than 65% missing values, as they will not add any value for modelling and exploration. The markdown file walks through the process of how we removed the variables. In addition, certain features, such as `last_fico_range_high`, were also removed to prevent data leakage. Finally, we also based our feature selection on the documentation and domain knowledge, as many literature had highlighted the importance of some variables in P2P lending. An example of such literature can be found [here](https://www.liebertpub.com/doi/full/10.1089/big.2018.0092).
+
+
+```{r Extracting Relevant Features}
+# Extracting relevant features
+
+# Creating new data frame which we will work on
+lending.club.relevant.data = lending.club.loan
+
+# Only selecting rows that have less than 35% missing data 
+# since we can't fill these columns, we drop them 
+lending.club.relevant.data = lending.club.relevant.data[,!sapply(lending.club.relevant.data, function(x) mean(is.na(x)))>0.35]
+
+# Dropping arbitrary applicant input columns 
+lending.club.relevant.data = subset(lending.club.relevant.data, select = - c(emp_title, title, initial_list_status))
+
+# Dropping applicant inputs and post-loan attributes
+lending.club.relevant.data = subset(lending.club.relevant.data,select = -c(total_pymnt, pymnt_plan, total_pymnt,total_pymnt_inv,last_pymnt_d, last_pymnt_amnt, out_prncp,out_prncp_inv, total_rec_prncp, hardship_flag, collection_recovery_fee,collections_12_mths_ex_med, debt_settlement_flag,policy_code, grade, sub_grade)) 
+```
+
+```{r Relevant Columns}
+# Selecting relevant columns from data using domain knowledge
+relevant.columns = c( 'loan_amnt', 'funded_amnt', 'term', 'int_rate', 'installment', 'grade', 'emp_length', 'home_ownership', 'annual_inc', 'verification_status', 'issue_d', 'loan_status', 'purpose', 'dti', 'delinq_2yrs', 'earliest_cr_line', 'open_acc', 'pub_rec','revol_bal', 'revol_util', 'total_pymnt', 'last_pymnt_d', 'recoveries')
+
+# Fetching relevant rows and columns
+# final data frame we will work with
+lending.club.relevant.data = lending.club.loan[, relevant.columns]
+```
+
+### Final Columns Used
+
+1. `loan_amnt` - The listed amount of the loan applied for by the borrower. If at some point in time, the credit department reduces the loan amount, then it will be reflected in this value.
+
+2.  `funded_amnt` - The total amount committed to that loan at that point in time.
+
+3. `term` - The number of payments on the loan. Values are in months and can be either 36 or 60.
+
+4. `int_rate` - Interest Rate on the loan
+
+5. `installment` - The monthly payment owed by the borrower if the loan originates.
+
+6. `grade` - LC assigned loan grade.
+
+7. `emp_length` - Employment length in years. Possible values - 0 and 10
+
+8. `home_ownership` - Provided by the borrower during the application
+
+9. `annual_inc` - Self-reported annual income provided by the borrower
+
+10. `verification_status` - Indicates that the co-borrowers income was verified by Lending Club
+
+11. `issue_d` - Loan issue date
+
+12. `loan_status` - Final status of the loan
+
+13. `purpose` - Category recorded by the buyer for loan request
+
+14. `dti` - Monthly debt payment/ reported monthly income
+
+15. `delinq_2yrs` - Number of 30+ days past due incidences of delinquency in borrowers' credit file in past 2 years
+
+16. `earliest_cr_line` -  Date of borrower's earliest credit line 
+
+17. `open_acc` - Number of open lines on the borrowers credit file
+
+18. `pub_rec` - Number of derogatory public records
+
+19. `revol_bal` - Total credit revolving balance
+
+20. `revol_util` - Revolving line utilization rate
+
+21. `total_pymnt` - Total payment made on the loan
+
+22. `last_pymnt_d` - The date the last payment was made
+
+23. `recoveries` - Money recovered after the loan was defaulted
+
+
+`loan_status` is the response variable (our outcome variable of interest) in our model. As we build the classification model to identify defaulters, we will consider our observations where `loan_status` is either "Fully Paid" or "Charged Off" for the degree of certainty. Unlike the rest of the values of the loan status, both fully paid and charged off are completed transactions, so the training data will ascertain whether a borrower defaulted or not.
+
+```{r Charged Off and Fully Paid}
+# only considering Charged Off or Fully Paid for our project
+
+lending.club.relevant.data = lending.club.relevant.data[(lending.club.relevant.data$loan_status == "Charged Off" | lending.club.relevant.data$loan_status == "Fully Paid"),]
+
+```
+
+```{r Splitting Columns}
+# Splitting columns based on types for cleaning and filtering the data    
+
+# Numeric columns
+numeric_cols = c('loan_amnt','funded_amnt', 'installment','annual_inc','dti','delinq_2yrs',
+             'open_acc', 'pub_rec','revol_bal','total_pymnt','recoveries')
+
+# Categorical columns
+cat_cols = c('term','grade','emp_length','home_ownership','verification_status',
+            'loan_status','purpose')
+
+# Percentage columns
+perc_cols = c('int_rate', 'revol_util')
+
+# Date columns
+date_cols = c('issue_d', 'earliest_cr_line', 'last_pymnt_d')
+```
+
+```{r Check Column Type Function}
+# this function assigns a variable to its correct type
+
+# this function checks all the columns in given list and if the column is already not of "check.type" converts them to the "check.type" 
+Check.column.type = function(column.names, check.type){
+  
+  
+  if(check.type == "numeric"){
+    
+      # For each column in the list
+      for(column in column.names){
+        
+        # Check if it is numeric
+        if(!is.numeric(lending.club.relevant.data[, column ])){
+          
+          # If not, convert it to numeric
+          lending.club.relevant.data[, column] = as.numeric(lending.club.relevant.data[, column])
+          
+        }
+        
+      }
+  }
+  
+  
+  if(check.type == "factor"){
+    
+      # For each column in the list
+      for(column in column.names){
+    
+        # Check if it is factor
+        if(!is.factor(lending.club.relevant.data[, column ])){
+          
+          # If not, convert it to numeric
+          lending.club.relevant.data[, column] = as.factor(lending.club.relevant.data[, column])
+          
+        }
+        
+      }
+    }
+}
+
+
+```
+
+
+
+```{r Variable Type Conversion}
+# converting each variables to its correct variable type
+
+Check.column.type(numeric_cols, "numeric")
+
+Check.column.type(cat_cols, "factor")
+
+Check.column.type(perc_cols, "numeric")
+
+```
+
+```{r String to Date Conversion}
+# Converting to date format the issue_d and last_paymt_d columns from string to date
+
+lending.club.relevant.data$issue_d = parse_date_time(lending.club.relevant.data$issue_d, orders = c("bdy", "bY"))
+
+
+lending.club.relevant.data$last_pymnt_d = parse_date_time(lending.club.relevant.data$last_pymnt_d, orders = c("bdy", "bY"))
+
+lending.club.relevant.data$earliest_cr_line = parse_date_time(lending.club.relevant.data$earliest_cr_line, orders = c("bdy", "bY"))
+
+```
+
+
+### Addressing Missing Values
+
+As with any raw data, it had many missing values across predictors. The fundamental part of preprocessing data is to accurately deal with missing values. There are generally three methods to manage missing values: delete, replace, or keep missing values. We deleted the columns above where missing vales were than 65%. In case of replacement we followed the best practice of median imputation, which means to replace missing values with the measure of center of variable. For rest of the variables where missing values were sources of information, we kept them as is.
+
+```{r Missing Values int_rate}
+raw.data = lending.club.relevant.data # working with copy of the dataframe
+
+#int_rate variable
+raw.data$int_rate <- raw.data$int_rate / 100
+
+#No missing values
+anyNA(raw.data$int_rate) 
+
+```
+
+```{r Missing Values revol_util}
+#revol_util variable
+raw.data$revol_util <- raw.data$revol_util / 100
+
+ #There are missing values
+anyNA(raw.data$revol_util)
+
+ #1802 missing values
+index.NA <- which(is.na(raw.data$revol_util))
+
+ #All missing values replaced by median 0.503
+raw.data$revol_util[index.NA] <- median(raw.data$revol_util, na.rm = TRUE)
+
+#No missing values
+anyNA(raw.data$revol_util)
+```
+
+
+```{r Missing Values revol_bal}
+
+# revol_bal 
+
+#No missing values
+anyNA(raw.data$revol_bal)
+```
+
+```{r Missing Values installment}
+# installment 
+
+# No missing values
+anyNA(raw.data$installment)
+```
+
+```{r Missing Values loan_amnt}
+# loan_amnt
+
+# No missing values
+anyNA(raw.data$loan_amnt)
+```
+
+```{r Missing Values annual_inc}
+# annual_inc
+
+
+# No missing values
+anyNA(raw.data$annual_inc)
+
+```
+
+
+```{r Missing Values dti}
+# dti
+
+#  missing values
+anyNA(raw.data$dti)
+
+index.NA <- which(is.na(raw.data$dti))
+
+# 312 missing values
+length(index.NA)
+
+raw.data$dti[index.NA] <- median(raw.data$dti, na.rm = TRUE)
+
+# No missing values
+anyNA(raw.data$dti)
+
+```
+
+
+```{r Missing Values open_acc}
+# open_acc
+
+# No Missing values
+anyNA(raw.data$open_acc)
+
+
+```
+
+
+```{r Missing Values pub_rec}
+# pub_rec
+
+# No Missing values
+anyNA(raw.data$pub_rec)
+
+
+```
+
+
+```{r Missing Values delinq_2yrs}
+# delinq_2yrs
+
+# No missing values
+anyNA(raw.data$delinq_2yrs)
+
+```
+
+
+```{r Missing Values inq_last_6mths}
+# inq_last_6mths
+
+# No Missing values
+anyNA(raw.data$inq_last_6mths)
+
+```
+
+### Detecting Outliers
+
+Outliers can distort statistical analysis. We used box plot to detect outliers and remove them to clean our data. There are two methods to handle outliers. The first method is using the rule of thumb where upper limit is computed as 1.5 * IQR where IQR is the difference between the upper and lower quartile.
+
+The second method is using judgement on the basis of statistics. For exampple, According to official statistics, the median annual income is 64000 USD. Therefore, in this case we considered all incomes which are greater than 1000000 USD as outliers and will remove from dataset.
+
+We will follow same procedure for all 23 variables. We will detect missing values and outliers and treat them as mentioned above.
+
+
+```{r Removing Outliers annual_inc}
+# Removing Outliers
+
+# Plotting box plot to detect outliers
+# Using log transform to better visualize and separate
+ggplot(data = lending.club.relevant.data, mapping = aes(x = log(annual_inc))) + geom_boxplot(fill = "steelblue") + labs(y = "Log of Annual Income", title = "Box Plot of Annual Income")
+
+# The max value is 110000000
+# We are selecting 1000000 as our limit 
+summary(lending.club.relevant.data$annual_inc)
+
+# 279 outliers detected
+index.outliers <- which(lending.club.relevant.data$annual_inc > 1000000) 
+
+length(index.outliers)
+
+# Removing the outliers
+raw.data = raw.data[-index.outliers,] 
+```
+
+
+```{r Removing Outliers dti}
+#Removing outliers for dti
+summary(raw.data$dti)
+
+# Plotting box plot to detect outliers
+# Using log transform to better visualize and separate
+ggplot(data = lending.club.relevant.data, mapping = aes(x = log(dti))) + geom_boxplot(fill = "dodgerblue3")
+
+# upper_limit = 43.35
+# We are selecting upper limit as 1.5 times interquantile range above the 75th percentile here
+outliers_upperlimit <- quantile(raw.data$dti, 0.75) + 1.5 * IQR(raw.data$dti) 
+
+
+index.outliers.dti <- which(raw.data$dti > outliers_upperlimit | raw.data$dti < 0 )
+
+# 4944 outliers
+length(index.outliers.dti)
+
+
+# Removing outliers
+raw.data <- raw.data[-index.outliers.dti,]
+
+```
+
+```{r Removing Outliers open_acc}
+# Removing outliers for open_acc
+summary(raw.data$open_acc)
+
+# For open values, if open accounts<0 or >50, we've considered them to be outliers
+index.outliers2 = which(raw.data$open_acc > 50 | raw.data$open_acc <0 ) 
+
+# 198 outliers
+length(index.outliers2)
+
+# Removing outliers
+raw.data = raw.data[-index.outliers2,] 
+```
+
+```{r Removing Outliers pub_rec}
+#Removing outliers for pub_rec
+summary(raw.data$pub_rec)
+
+# For pub_rec < 0 or > 20, we've considered them to be outliers
+index.outliers3 <- which(raw.data$pub_rec > 20 | raw.data$pub_rec <0 ) 
+
+# 26 outliers
+length(index.outliers3)
+
+# Removing outliers
+raw.data <- raw.data[-index.outliers3,] 
+
+```
+
+```{r Removing Outliers delinq_2yrs}
+
+#Removing outliers for delinq_2yrs
+summary(raw.data$delinq_2yrs)
+
+index.outliers4 <- which(raw.data$delinq_2yrs > 20 | raw.data$delinq_2yrs <0 ) #7 outliers
+
+# 18 outliers
+length(index.outliers4)
+
+raw.data = raw.data[-index.outliers4,] #Removing observations
+
+```
+
+```{r Removing Outliers installment}
+summary(raw.data$installment)
+
+ggplot(data = raw.data, mapping = aes(x = installment)) + geom_boxplot(fill = "dodgerblue3")
+
+# Outlier value - 1105.875
+outliers_upperlimit <- quantile(raw.data$installment, 0.75) + 1.5 * IQR(raw.data$installment) 
+
+index.outliers.installment <- which(raw.data$installment > outliers_upperlimit | raw.data$installment < 0 )
+
+# 40651 outliers
+length(index.outliers.installment)
+
+
+# Removing outliers
+raw.data <- raw.data[-index.outliers.installment,]
+
+```
+
+
+```{r Removing Outliers revol_bal}
+
+#Removing outliers for revol_bal
+summary(raw.data$revol_bal)
+#plot(raw.data$revol_bal)
+
+index.outliers5 <- which(raw.data$revol_bal > 500000 | raw.data$revol_bal <0 ) #56 outliers
+
+# 124 outliers
+length(index.outliers5)
+
+raw.data <- raw.data[-index.outliers5,] #Removing observations
+
+```
+
+
+```{r}
+lending.club.relevant.data = raw.data # reverting the dataframe
+```
+
+
+```{r fig.width=6, fig.height=4, dpi=70, fig.align='center', cache=TRUE}
+
+#maping the categories to default and not default
+lending.club.relevant.data$loan_status = mapvalues(lending.club.relevant.data$loan_status, from = c("Does not meet the credit policy. Status:Fully Paid", "Fully Paid", "Charged Off", "Late (31-120 days)", "In Grace Period", "Does not meet the credit policy. Status:Charged Off", "Late (16-30 days)", "Current" ), to = c("Not Default", "Not Default", "Default", "Default", "Default", "Default","Default", "Default" ))
+```
+
+
+```{r}
+# as the `emp_length` is a categorical variable, we will make four bins 'Unemployed', '0-2', '3-5', '6-9', and '10+' for intuitive sense.
+
+lending.club.relevant.data$emp_length = mapvalues(lending.club.relevant.data$emp_length, from = c("< 1 year", "1 year", "2 years",   "3 years", "4 years", "5 years", "6 years","7 years","8 years","9 years", "n/a" ), to = c("0-2", "0-2", "0-2", "3-5", "3-5", "3-5", "6-9", "6-9", "6-9", "6-9", "Unemployed"))
+
+lending.club.relevant.data$emp_length = factor(lending.club.relevant.data$emp_length, levels = c("Unemployed", "0-2", "3-5", "6-9", "10+ years"))
+
+```
+
+We converted `n/a` to `Unemployed` because n/a only applies for borrowers if they do not have any employment history. Thus, we have labelled those borrowers as `Unemployed`.
+
+## Exploratory Data Analysis
+
+We will leverage various visualization techniques in this section to understand the summary of the features we selected and their relation with the loan status, if any.
+
+### 1. Loan Status
+
+```{r Loan Status}
+
+lending.club.relevant.data %>% 
+  group_by(loan_status) %>% 
+  summarize(frequency = n()) %>% 
+ggplot(mapping = aes(x = reorder(loan_status, frequency), y = frequency * 100 / sum(frequency), fill = frequency * 100 / sum(frequency)))+
+geom_bar(stat = "identity") + 
+labs(x = "Loan Status",  y = "Relative Frequency") + 
+theme(plot.title = element_text(hjust = 0.5)) + geom_text(aes(label = round((frequency * 100 / sum(frequency)), 2)), position= "stack",   vjust=-0.25) + scale_fill_gradientn(name = '',colours = rev(brewer.pal(10,'Spectral'))) + theme(legend.position = "none")
+```
+
+The bar graph shows an unequal distribution of the loan status in the dataset. 80.02% of borrowers fully repaid their loans while 19.98% (~1/5) defaulted on their loans. The classes, as a result, are imbalanced but expected. In any lending practice, we would expect a higher proportion of non-default borrowers.
+
+
+### 2. Loan Term
+
+```{r loan term length}
+lending.club.relevant.data %>% 
+  group_by(term) %>% 
+  summarize(frequency = n()) %>% 
+ggplot(mapping = aes(x = reorder(term, frequency), y = frequency * 100 / sum(frequency), fill = frequency * 100 / sum(frequency))) + geom_bar(stat = "identity") + labs(x = "Term Length",  y = "Relative Frequency", title = "Distribution by Loan Term Length") + theme(plot.title = element_text(hjust = 0.5)) + scale_fill_gradientn(name = '',colours = rev(brewer.pal(10,'Spectral'))) + theme(legend.position = "none") + geom_text(aes(label = round((frequency * 100 / sum(frequency)), 2)), position= "stack",   vjust=-0.25)
+```
+
+```{r violin plot of loan term among borrowers}
+ggplot(data = lending.club.relevant.data, aes(x = loan_status, y = loan_amnt, fill  = term)) + geom_violin() + labs(x = "Loan Status", y = "Loan Amount", title = "Distribution of Loan Terms among Borrowers") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+As the bar graph depicts, 3 out of 4 borrowers borrow for short-term (36 months). The pattern is true across both defaulters and non-defaulters. Moreoever, the violin plot shows us that short-term loan also has lower loan amount. Finally, there is not systematic relationship with defaulters and (loan amount and loan-term).
+
+### 3. Borrowers Home Ownership Type
+
+```{r bar graph of home ownership of borrowers}
+# bar graph of home ownership of borrowers
+
+lending.club.relevant.data %>% 
+  group_by(home_ownership) %>% 
+  summarize(frequency = n()) %>% 
+ggplot(mapping = aes(x = reorder(home_ownership, frequency), y = frequency * 100 / sum(frequency))) + 
+geom_bar(stat = "identity", fill  = "steelblue") + labs(x = "Home Ownership Type",  y = "Relative Frequency", title = "Distribution of Home Ownership of Borrowers") + 
+theme(plot.title = element_text(hjust = 0.5)) + geom_text(aes(label = round((frequency * 100 / sum(frequency)), 2)), position= "stack", vjust=-0.25)
+
+```
+
+As we would expect, an overwhelming majority of the borrowers, as the figure above shows, either have mortgages or rent their real estate.
+
+### 4. Borrowers' Grade
+```{r}
+# to visualize the significant types of loan grade that will be used in model
+
+lending.club.relevant.data %>% 
+  group_by(grade) %>% 
+  summarize(frequency = n()) %>% 
+ggplot(mapping = aes(x = reorder(grade, frequency), y = frequency * 100 / sum(frequency), fill = frequency * 100 / sum(frequency)))+
+geom_bar(stat = "identity") + 
+labs(x = "Lending Club Assigned Loan Grade",  y = "Relative Frequency", title = "Distribution of Loan of Borrowers' Grade") + 
+theme(plot.title = element_text(hjust = 0.5)) + geom_text(aes(label = round((frequency * 100 / sum(frequency)), 2)), position= "stack",   vjust=-0.25) + scale_fill_gradientn(name = '',colours = rev(brewer.pal(10,'Spectral'))) + theme(legend.position = "none")
+
+```
+
+Lending Club assigns a grade to each loan to reflect the credit risk of the corresponding loan. Lower the loan grade, higher the associated risk. The graph above depicts that a majority of the loans (~60%) fall in either B or C category. Not surprisingly, the relative frequencies of lower grades loan (e.g. F and G) are low. Overall, we can infer that the loans at Lending Club have a little to moderate level of risk.
+
+### 5. Distribution of Loan Grade
+
+```{r}
+ggplot(data = lending.club.relevant.data, mapping = aes(x = grade, fill  = loan_status)) + 
+geom_bar() + labs(x = "Lending Club Assigned Loan Grade", y = "Frequency", title = "Loan Grade Distribution by Loan Status") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+This is interesting! A higher calibre loan grade, say grade A, has as a substantially low number of defaulters. However, the percentage of defaulters increases as the loan grade decreases. For example, the Loan Grade C has around 25% of defaulters; as we move to loan grade D, the percentage increases to appox. 33%. And the trend continues. The LC assigned loan grade, therefore, could be a loose proxy to an individual defaulting on the loan.
+
+
+### 6. Year of Employment among Borrowers
+```{r, cache = TRUE}
+
+ggplot(data = lending.club.relevant.data, mapping = aes(x = emp_length, fill  = loan_status)) + geom_bar() +labs(x = "Employment Length, in Years", y =  "Frequency", title = "Distribution of Employment Length by Loan Status", fill = "Loan Status") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+The bar graph demonstrates that a majority of borrowers have an employment history of 10 years and above. As the dataset has higher volume of non-default borrowers, we expectedly observe a higher frequency of non-defaulters in each employment length. However, there does not exist a systematic difference between default and non-default borrowers in employment length.
+
+Interestingly, unemployed borrowers tend to be more non-defaulters than defaulters.
+
+### 7. Borrower's Annual Income
+
+```{r borrower annual income by loan status}
+ggplot(data = lending.club.relevant.data, aes(x = annual_inc, fill = loan_status)) + 
+geom_histogram(breaks = seq(0, 100000, by = 5000), position = "fill", binwidth = 1) + theme(plot.title = element_text(hjust = 0.5)) + 
+  
+  labs(x = "Annual Income", y =  "Conditional Probability", title = "Borrower's Annual Income by Loan Status", fill = "Loan Status")
+```
+
+The stacked column, in overall, tells us that the percentage of defaulters decrease with increase in annual income. In other words, an individual is much more likely to default with lower income than they are with higher annual income. The figure makes intuitive sense.
+
+Ironically, a small bump we observe in the first bin shows that it has a lower conditional probability of defaulters than its neighboring bins. It maybe because the first bin also includes unemployed borrowers (no income), and the employment length distribution (see Figure 5) shows that unemployed borrowers tend to be more non-defaulters than defaulters.
+
+### 8. Loan Borrower's Purpose
+
+```{r}
+
+lending.club.relevant.data %>% 
+  group_by(purpose) %>% 
+  summarize(frequency = n()) %>% 
+ggplot(mapping = aes(x = reorder(purpose, frequency), y = frequency * 100 / sum(frequency), fill = frequency * 100 / sum(frequency))) + geom_bar(stat = "identity") + 
+labs(x = "Borrower's Purpose",  y = "Relative Frequency", title = "Distribution of Loan by Borrower's Purpose", fill = "Relative Frequency") + theme(plot.title = element_text(hjust = 0.5)) + 
+scale_fill_gradient(low = "#56B1F7", high = "#132B43") + coord_flip()
+
+```
+
+```{r}
+ggplot(lending.club.relevant.data, aes(x = purpose, y = ..prop.., group = loan_status)) + 
+geom_bar(aes(fill = factor(..x..)), stat="count") + 
+scale_y_continuous(labels=scales::percent) +
+labs (x = "Purpose", y = "Relative Frequency", title = "Purpose of Loan Among Defaulters and Non-Defaulters") +
+facet_grid(~loan_status)+ 
+coord_flip() + theme(legend.position = "none", plot.title = element_text(hjust = 0.5))
+```
+
+The first bar graph shows us that close to 60% of individuals borrow money to refinance their debt and a little over 20% borrow to pay their credit card bills. And to further refine, the pattern is true across both defaulters and non-defaulters. In other words, borrowers who default not necessarily borrow for any different reason that do non-defaulters.
+
+### 9. Correlation Matrix
+
+Finally, we leveraged correlation as a similarity metric to unearth the patterns among the continuous input variables. As the correlation matrix depicts, we do not observe a subsntial correlation among any two variables. The only high correlation we observe is with `loan_amnt`, `installment`, and `total_pymnt`, which make intuitive sense. Higher the loan amount, higher the installment for a given term. As a result, a borrower's total payment will also be high.
+
+```{r Correlation Matrix, cache = TRUE}
+# Getting the correlation matrix
+var.names = c('loan_amnt', 'installment','annual_inc','dti','delinq_2yrs',
+             'open_acc', 'pub_rec','revol_bal','total_pymnt','recoveries')
+
+panel.cor <- function(x, y, digits = 2, prefix = "", cex.cor, ...)
+{
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    r <- (cor(x, y))
+    txt <- format(c(r, 0.123456789), digits = digits)[1]
+    txt <- paste0(prefix, txt)
+    if(missing(cex.cor)) cex.cor <- 0.8/strwidth(txt)
+    text(0.5, 0.5, txt, cex = pmax(1, cex.cor * r))
+}
+
+# Use panel.cor to display correlations in lower panel
+test = pairs(lending.club.relevant.data[,var.names], lower.panel = panel.cor)
+```
+
+
+## Methodology
+
+EDA helped us paint a picture of the descriptive features and how their relationship plays out with our outcome variable. As a result, we have used the following 15 variables for our modeling.
+
+We will use supervised learning technique that maps an input to an output based on an exampled input-output pairs. It inferes a function from labeled training data consisting of set of training examples.
+
+Before we building the model, we will split our data into training and test set. First, we are going to train the classifier on the training data. Second, we are going to test performance of our classifier on the test class where labels are unknown. Finally, we will compute several important performance metrics (accuarcy, specificty, sensitiviy, and recall) to gauge the performance of our model. We will end our methodology with a ROC curve to determine and visualize the performance of our model.
+
+**Splitting:** The best way to split our data into training and test set is by cross-validation (exhaustive and non-exhaustive cross validation) that uses multiple test sets. However, given our dataset, cross-validation is very time consuming process to run on a local mortal machine. Therfore, for computational reasons, in this project, we decided to use a single split method where we split the training set (70%) and test set (30%) using sample.split function.
+
+**Cut Off:** The best solution for investors would be to choose the cut-off value depending upon which investment strategy they want to play. Deciding which cut-off to choose is very important because based on that value it will be determined whether high sensitivity is required for risky investors(they are fine with True Default being labelled as Not Default) or high specificity is required for conservative investors(they are fine with Not Default being labelled as Default).
+
+**Evaluation:** The two most important measures to evaluate models are accuracy and misclassification rate. But with an imbalanced, accuracy can give misleading conclusion on the model's performance. We consider other metrics - specificity and sensitivity - as performance measures to later determine threshold and best model. 
+
+*Specificity (True Negative Rate)* = # of observations correclty classified as non-events / # observations that did not have the event = TN / (TN + FP)
+
+*Sensitivity (Recall)* = # of observations correclty classified as events/ # of observations that have the event = TP/ (TP+ FN)
+
+As Not-Default is considered as the positive label in our model, specificity is desirable when FP are costly than FN. On the flip side, sensitivity is desirable when FN are more costly than FP.
+
+### Selected Models
+We have decided to work with 3 models of different levels of complexity and each having different characteristics. We are going to compare performance as mentioned above. Following are the reasons for our selection of these models:
+
+*1. Logistic Regression*: This is the simplest model and as this is a high dimensional dataset, it has a higher tendency to overfit. Therefore, by using a simple model, we are tackling the issue of overfitting. Also, Logistic regression is easier to implement, interpret, and very efficient to train.
+
+*2. Linear Discriminant Analysis*:  Logistic regression also has some disadvantages. It can become unstable when there are few observations from which to estimate the parameters. Also, it can be unstable when  the classes are well separated. LDA tackles these issues. Also, LDA can capture interaction effects and provide more complex models than those provided by logistic regression. 
+
+We didn't use QDA because the data has very high dimensions. Therefore, using QDA would have been highly inefficient as it uses separate covariance matrix for each class. 
+
+*3. Random Forests*: Random forests can capture complex interactions and also are very flexible. They take advantage of "Wisdom of the crowds" and work well in many situations. They provide a reliable feature importance estimate. Also, they offer efficient estimates of the test error without incurring the cost of repeated model training associated with cross-validation.
+
+Finally, we didn't use Naive Bayes as it makes a very strong assumption that the predictors are independent. The correlation matrix above shows that such an assumption might not hold. Therefore, we decided to discard this model.
+
+
+```{r Subset Selection, cache = TRUE}
+# Removing total_funded as it is always the same as required amount
+# Removed correlated terms and also other terms to avoid data leakage
+lending.club.relevant.data.subset = subset(lending.club.relevant.data, select = c(1,4:11,12,13,14,17:19))
+
+# 15 variables used in model building
+names(lending.club.relevant.data.subset)
+
+# Splitting into training and testing sets
+testing.index = sample(1:nrow(lending.club.relevant.data), nrow(lending.club.relevant.data)*0.3)
+
+testing.data = lending.club.relevant.data.subset[testing.index,]
+
+training.data = lending.club.relevant.data.subset[-testing.index,]
+
+# Data frame to store the model AUC details
+model_auc_performance = data.frame(model = character(0), auc = numeric(0), stringsAsFactors = FALSE)
+```
+
+### Model 1: Logistic Regression
+
+For binary classification where borrower will default or not, we used logistic regression as our first model type. We have used glm funtion to make a classifier and provided the training set to learn the classifier. Then we used predict function on test set to get prediction.
+
+We used confusion matrix and different threshold to identify different configurations of the model different types of investors will utilize.
+
+
+```{r Logistic Regression}
+# LOGISTIC REGRESSION
+loan.model.logistic = glm(loan_status~., data = training.data, family = binomial)
+
+# venstor storing the prediction
+training.result.logistic = predict(loan.model.logistic, newdata = testing.data, type = "response")
+
+sum(testing.data$loan_status == "Default")
+
+# We have labelled not default as positive label and default as negatice label
+
+#cut-off 0.5 threshold
+predicted.classes = ifelse(training.result.logistic < 0.5, "Default", "Not Default")
+
+
+predicted.classes = as.factor(predicted.classes)
+
+# printing confusion matrix
+conf.mat = table(testing.data$loan_status, predicted.classes)
+
+
+# Calculate all metrics
+  acc <- sum(diag(conf.mat)) /  nrow(testing.data)
+  sens <-conf.mat[2,2] / sum(conf.mat[2,])
+  spec <-conf.mat[1,1] / sum(conf.mat[1,])
+  ppv <-conf.mat[2,2] / sum(conf.mat[,2])
+  npv <-conf.mat[1,1] / sum(conf.mat[,1])
+  prec <- ppv
+  rec <- sens
+  
+  metric.names <- c("accuracy", "sensitivity", "specificity", 
+                    "ppv", "npv", "precision", "recall")
+  
+  metric.vals <- c(acc, sens, spec, ppv, npv, prec, rec)
+  
+  # Form into data frame
+  full.df <- data.frame(value = metric.vals)
+  
+  rownames(full.df) <- metric.names
+  
+  output_0.5 = list(conf.mat =conf.mat, perf = full.df)
+
+
+print(output_0.5)
+
+
+#cut-off 0.8 threshold
+predicted.classes = ifelse(training.result.logistic < 0.8, "Default", "Not Default")
+
+
+predicted.classes = as.factor(predicted.classes)
+
+#predicted.classes = factor(predicted.classes, levels = c("Not Default", "Default"))
+
+# printing confusion matrix
+conf.mat = table(testing.data$loan_status, predicted.classes)
+
+
+# Calculate all metrics
+  acc <- sum(diag(conf.mat)) /  nrow(testing.data)
+  sens <-conf.mat[2,2] / sum(conf.mat[2,])
+  spec <-conf.mat[1,1] / sum(conf.mat[1,])
+  ppv <-conf.mat[2,2] / sum(conf.mat[,2])
+  npv <-conf.mat[1,1] / sum(conf.mat[,1])
+  prec <- ppv
+  rec <- sens
+  
+  metric.names <- c("accuracy", "sensitivity", "specificity", 
+                    "ppv", "npv", "precision", "recall")
+  
+  metric.vals <- c(acc, sens, spec, ppv, npv, prec, rec)
+  
+  # Form into data frame
+  full.df <- data.frame(value = metric.vals)
+  
+  rownames(full.df) <- metric.names
+  
+  output_0.8 = list(conf.mat =conf.mat, perf = full.df)
+
+
+print(output_0.8)
+
+Roc.Auc.logistic = roc(testing.data$loan_status, training.result.logistic)
+
+model_auc_performance[1,] = c("Logistic Regression", round(Roc.Auc.logistic$auc, 3))
+
+```
+The accuracy for logistic model with cut-off 0.5 is 89% and with threshold 0.8 is 63.8%. Similarly, for risky investors, a model with 0.5 threshold is better with high sensitivity of 98%. 
+For conservative investors, a model with 0.8 threshold is better with high specificity of 67.06%
+
+### Model 2: Linear Discriminant Analysis
+
+```{r LDA, cache=TRUE}
+
+# Linear Discriminant Analysis
+
+lending.model.lda <- lda(loan_status ~ ., data=training.data)
+
+lda.pred <- predict(lending.model.lda, newdata = testing.data, type = "response")
+
+Roc.Auc.lda = roc(testing.data$loan_status, lda.pred$posterior[,"Default"] )
+
+model_auc_performance[2,] = c("Linear Discriminant Analysis", round(Roc.Auc.lda$auc, 3))
+
+```
+
+### Model 3: Random Forest
+
+```{r Random Forest, cache=TRUE}
+# RANDOM FOREST
+
+# ideally we would like to make a grid  of number of trees and # of variables in each split
+# for computational reasons, we have selected 10 trees and 3 variables
+
+loan.model.randomForest = randomForest(loan_status ~ ., data = training.data, ntree = 10, mtry = 3, importance = TRUE)
+
+training.result.rf=  predict(loan.model.randomForest, newdata = testing.data, type = "prob")
+
+Roc.Auc.random.forest = roc(testing.data$loan_status, training.result.rf[,"Default"])
+
+model_auc_performance[3,] = c("Random Forest", round(Roc.Auc.random.forest$auc, 3))
+```
+
+
+```{r ROC curve}
+# Compare performance of model on the basis of auc and ROC curve
+print(model_auc_performance)
+
+plot(Roc.Auc.random.forest, col = "red",  main = "ROC")
+plot(Roc.Auc.logistic, col = "yellow",add = TRUE)
+plot(Roc.Auc.lda, col = "blue", lty = 2, add = TRUE)
+
+legend("bottomright",legend=c("Random Forest","Logistic regression","LDA"),fill=c("red","yellow","blue"))
+```
+  
+As the figure indicates, ROC graphs are not significantly different. We are surprised to find that based on AUC, logistic regression performs the best. LDA also provides a similar performance, as the curve overlaps with the logistic regression. We recommend Logistic Regression as a model of choice for predicting Default loans for this dataset as LDA model are more complex and less interpretable.
+
+An ensemble model, Random Forest is inherently less interpretable. Training a large number of deep trees can have high computational costs (but can be parallelized) and use a lot of memory. Predictions are slower, which may create challenges for applications.
+
+## Discussion and Conclusion
+
+As mentioned above, the logistic regression performed the best among the three chosen models in our dataset and feature engineering. We had catered the cut-off in logistic regression based on an investor's risk appetite.
+
+However, as with any analytical work, our model also suffers from limitations and leaves room for future improvements. To begin with, we considered both the loan terms (36 months and 60 months) in our model. Although our violin plot suggested that there are no systematic differences among defaulters and loan terms, the length of loan can have significant consequences in the loan amount, tendency to borrow a loan, and as a result, the default rate. Future works can incorporate two different prediction models based on the loan term.
+
+Similarly, because of the gravity of the associated risk in P2P lending, a predictive model to calculate ROI based on the likelihood of the individuals defaulting the loan could also be desirable. Varibles such as the last payment date could be used as a measure of when the borrower defaulted. An investor will equally be interested in *when* the borrower will default and calculate expected ROI based on such a timeline.
+
+
+
+ 
